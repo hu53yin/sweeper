@@ -41,37 +41,45 @@ export class SweepService {
     gasPrice: bigint,
     gasPriceFromNetwork: bigint,
   ) {
-    const balance = await this.providerService.getBalance(depositAddr);
+    try {
+      const balance = await this.providerService.getBalance(depositAddr);
 
-    if (balance > 0n) {
-      const effectiveGasPrice = this.decideGasPrice(
-        gasPrice,
-        gasPriceFromNetwork,
-      );
+      if (balance > 0n) {
+        const effectiveGasPrice = this.decideGasPrice(
+          gasPrice,
+          gasPriceFromNetwork,
+        );
 
-      const nonce = await this.providerService.provider.eth.getTransactionCount(
-        depositAddr,
-        'pending',
-      );
+        const maxGasAmount = BigInt(21000);
+        const estimatedTransactionFee = maxGasAmount * effectiveGasPrice;
 
-      const txParams: Transaction = {
-        nonce: nonce.toString(),
-        from: depositAddr,
-        to: destinationAddress,
-        gasPrice: effectiveGasPrice.toString(),
-        value: '0',
-      };
+        const nonce =
+          await this.providerService.provider.eth.getTransactionCount(
+            depositAddr,
+            'pending',
+          );
 
-      const gasEstimate =
-        await this.providerService.provider.eth.estimateGas(txParams);
-      const totalFee = BigInt(gasEstimate) * effectiveGasPrice;
+        const txParams: Transaction = {
+          nonce,
+          from: depositAddr,
+          to: destinationAddress,
+          gasPrice: effectiveGasPrice.toString(),
+          value: (balance - estimatedTransactionFee).toString(),
+        };
 
-      txParams.value = (balance - totalFee).toString();
-      txParams.gas = gasEstimate.toString();
+        const gasEstimate =
+          await this.providerService.provider.eth.estimateGas(txParams);
+        const totalFee = gasEstimate * effectiveGasPrice;
 
-      if (BigInt(txParams.value) > 0n) {
-        await this.signAndSend(txParams);
+        txParams.value = (balance - totalFee).toString();
+        txParams.gas = gasEstimate.toString();
+
+        if (BigInt(txParams.value) > 0n) {
+          await this.signAndSend(txParams);
+        }
       }
+    } catch (error) {
+      console.error('Error in sweepEth: ', error);
     }
   }
 
@@ -82,30 +90,69 @@ export class SweepService {
     gasPrice: bigint,
     gasPriceFromNetwork: bigint,
   ) {
+    let currentNonce =
+      await this.providerService.provider.eth.getTransactionCount(depositAddr);
+
     for (const tokenAddr of erc20Addresses) {
-      const tokenContract = this.providerService.getTokenContract(tokenAddr);
-      const tokenBalance = await (tokenContract.methods as any)
-        ['balanceOf'](depositAddr)
-        .call();
+      try {
+        const tokenContract = this.providerService.getTokenContract(tokenAddr);
+        const tokenBalance = await (tokenContract.methods as any)
+          ['balanceOf'](depositAddr)
+          .call();
 
-      if (tokenBalance > 0) {
-        const data = (tokenContract.methods as any)
-          ['transfer'](destinationAddress, tokenBalance)
-          .encodeABI();
+        if (tokenBalance > 0) {
+          const data = (tokenContract.methods as any)
+            ['transfer'](destinationAddress, tokenBalance)
+            .encodeABI();
 
-        const txParams: Transaction = {
-          from: depositAddr,
-          to: tokenAddr,
-          data: data,
-          gasPrice: this.decideGasPrice(gasPrice, gasPriceFromNetwork),
-        };
+          const txParams: Transaction = {
+            from: depositAddr,
+            to: tokenAddr,
+            data: data,
+            nonce: currentNonce,
+            gasPrice: this.decideGasPrice(gasPrice, gasPriceFromNetwork),
+          };
 
-        const gas =
-          await this.providerService.provider.eth.estimateGas(txParams);
-        txParams.gas = gas;
+          const gas =
+            await this.providerService.provider.eth.estimateGas(txParams);
+          txParams.gas = gas;
 
-        await this.signAndSend(txParams);
+          await this.signAndSend(txParams);
+          currentNonce++;
+        }
+      } catch (error) {
+        console.error(
+          `Error in sweepERC20Tokens for token ${tokenAddr}: `,
+          error,
+        );
       }
+    }
+  }
+
+  private async signAndSend(txParams: Transaction) {
+    try {
+      let retryCount = 3;
+
+      while (retryCount > 0) {
+        try {
+          const signedTx =
+            await this.walletService.wallet.signTransaction(txParams);
+
+          await this.providerService.provider.eth.sendSignedTransaction(
+            signedTx.rawTransaction,
+          );
+          break;
+        } catch (error) {
+          if (error.message.includes('nonce too low')) {
+            txParams.nonce = BigInt(txParams.nonce) + 1n;
+            retryCount--;
+          } else {
+            throw error;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in signAndSend: ', error);
     }
   }
 
@@ -114,12 +161,5 @@ export class SweepService {
     gasPriceFromNetwork: bigint,
   ): bigint {
     return gasPrice > gasPriceFromNetwork ? gasPrice : gasPriceFromNetwork;
-  }
-
-  private async signAndSend(txParams: Transaction) {
-    const signedTx = await this.walletService.wallet.signTransaction(txParams);
-    await this.providerService.provider.eth.sendSignedTransaction(
-      signedTx.rawTransaction,
-    );
   }
 }
