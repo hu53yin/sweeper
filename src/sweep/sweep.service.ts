@@ -18,16 +18,16 @@ export class SweepService {
     const gasPriceFromNetwork = await this.providerService.getGasPrice();
 
     for (const depositAddr of sweepTokensDto.depositAddresses) {
-      await this.sweepEth(
+      await this.sweepERC20Tokens(
         depositAddr,
+        sweepTokensDto.erc20Addresses,
         sweepTokensDto.destinationAddress,
         gasPrice,
         gasPriceFromNetwork,
       );
 
-      await this.sweepERC20Tokens(
+      await this.sweepEth(
         depositAddr,
-        sweepTokensDto.erc20Addresses,
         sweepTokensDto.destinationAddress,
         gasPrice,
         gasPriceFromNetwork,
